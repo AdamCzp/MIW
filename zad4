@@ -1,0 +1,208 @@
+// BITY KONFIGURACYJNE MIKROKONTROLERA
+#pragma config POSCMOD = XT      
+#pragma config OSCIOFNC = ON     
+#pragma config FCKSM = CSDCMD   
+#pragma config FNOSC = PRI       
+#pragma config IESO = ON         
+#pragma config WDTPS = PS32768   
+#pragma config FWPSA = PR128     
+#pragma config WINDIS = ON       
+#pragma config FWDTEN = OFF      
+#pragma config ICS = PGx2        
+#pragma config GWRP = OFF        
+#pragma config GCP = OFF         
+#pragma config JTAGEN = OFF      
+ 
+// DEFINICJE I PLIKI
+#include <xc.h>        
+#include <stdbool.h>   // Biblioteka dla typu bool 
+#include <stdint.h>    // Biblioteka dla typów całkowitych
+#include <string.h> // Biblioteka dla funkcji operujących na stringach 
+ 
+#define FCY 4000000UL      // Częstotliwość 
+#include <libpic30.h>  // Biblioteka dla funkcji opóźniających 
+ 
+// DEFINICJE DLA WYŚWIETLACZA LCD
+#ifndef SYSTEM_PERIPHERAL_CLOCK
+#define SYSTEM_PERIPHERAL_CLOCK FCY // Używamy FCY jako zegara dla peryferiów PMP
+#endif
+ 
+#define CYCLES_PER_DELAY_LOOP 12 // liczba cykli pętli LCD_Wait
+ 
+// oblicza potrzebną liczbę w pętli opóźniającej 
+#define LCD_SIGNAL_TIMING         (((SYSTEM_PERIPHERAL_CLOCK/1000)*1)/1000)/CYCLES_PER_DELAY_LOOP     // ~1us
+#define LCD_F_INSTR               (((SYSTEM_PERIPHERAL_CLOCK/1000)*40)/1000)/CYCLES_PER_DELAY_LOOP    // ~40us
+#define LCD_S_INSTR               (((SYSTEM_PERIPHERAL_CLOCK/1000)*1640)/1000)/CYCLES_PER_DELAY_LOOP // ~1.64ms
+#define LCD_STARTUP               (((SYSTEM_PERIPHERAL_CLOCK/1000)*60000)/1000)/CYCLES_PER_DELAY_LOOP// ~60ms 
+ 
+#define LCD_MAX_COLUMN            16 // Liczba kolumn wyświetlacza 
+ 
+// wysyła dane i komendy do LCD przez PMP
+// PMADDR = 0x0001 (A0=1) dla danych (RS=1)
+// PMADDR = 0x0000 (A0=0) dla komend (RS=0)
+// PMDIN1 to rejestr danych PMP
+#define LCD_SendData(data) { PMADDR = 0x0001; PMDIN1 = data; LCD_Wait(LCD_F_INSTR); }
+#define LCD_SendCommand(command, delay) { PMADDR = 0x0000; PMDIN1 = command; LCD_Wait(delay); }
+ 
+// Definicje standardowych komend dla kontrolera HD44780
+#define LCD_COMMAND_CLEAR_SCREEN        0x01 // Wyczyść ekran
+#define LCD_COMMAND_RETURN_HOME         0x02 // Powrót kursora na pozycję początkową (0,0)
+#define LCD_COMMAND_ENTER_DATA_MODE     0x06 // kursor przesuwa się w prawo, wyświetlacz nie przesuwa się
+#define LCD_COMMAND_CURSOR_OFF          0x0C // Wyświetlacz WŁ, Kursor WYŁ, Miganie WYŁ
+#define LCD_COMMAND_CURSOR_ON           0x0F // Wyświetlacz WŁ, Kursor WŁ, Miganie kursora WŁ
+#define LCD_COMMAND_MOVE_CURSOR_LEFT    0x10 // Przesuń kursor o jedną pozycję w lewo
+#define LCD_COMMAND_MOVE_CURSOR_RIGHT   0x14 // Przesuń kursor o jedną pozycję w prawo
+#define LCD_COMMAND_SET_MODE_4_BIT      0x28 // Ustaw tryb 4-bitowy, 2 linie, 5x7 (nieużywane)
+#define LCD_COMMAND_SET_MODE_8_BIT      0x38 // Ustaw tryb 8-bitowy, 2 linie, 5x7
+#define LCD_COMMAND_ROW_0_HOME          0x80 // Ustaw kursor na początek pierwszej linii 
+#define LCD_COMMAND_ROW_1_HOME          0xC0 // Ustaw kursor на początek drugiej linii 
+ 
+// inicjalizacyjna 
+#define LCD_START_UP_COMMAND_1          0x33 // używane w inicjalizacyji
+#define LCD_START_UP_COMMAND_2          0x32 // Dla zapewnienia przejścia w tryb 8-b
+ 
+// ZMIENNE GLOBALNE 
+static uint8_t current_lcd_row = 0;    // Aktualny wiersz, na którym znajduje się kursor 
+static uint8_t current_lcd_column = 0; // Aktualna kolumna, na której znajduje się kursor 
+ 
+// ZMIENNE GLOBALNE DLA REKLAMY
+int scrollPosLine1 = 0; // Pozycja przewijania dla pierwszej linii
+int scrollPosLine2 = 0; // Pozycja przewijania dla drugiej linii
+ 
+// Teksty do wyświetlenia (mogą być dłuższe niż 16 znaków)
+const char* advertisementLine1 = "    PIZZA HAWAJSKA DLA WSZYSTKICH!"; // Dodaj spacje na końcu przejścia
+const char* advertisementLine2 = "    Glosuj na Domino Jachasia     ";
+ 
+// funkcja opozniajaca 
+static void LCD_Wait(uint32_t delay) {
+    while (delay) {
+        Nop(); // Instrukcja No Operation zużywa cykle zegara
+        delay--;
+    }
+}
+ 
+// inicjlizacja LCD
+bool LCD_Initialize(void) {
+    // Konfiguracja PMP
+    PMMODE = 0x03FF; 
+    PMCON = 0x8383;  
+    PMAEN = 0x0001;  
+    // start LCD
+    LCD_Wait(LCD_STARTUP); // Długie opóźnienie startowe
+    LCD_Wait(LCD_STARTUP); // opóźnienie dla stabilizacji
+ 
+    // Komendy inicjalizacyjne
+    LCD_SendCommand(LCD_START_UP_COMMAND_1, LCD_F_INSTR); 
+    LCD_SendCommand(LCD_START_UP_COMMAND_2, LCD_F_INSTR);
+    LCD_SendCommand(LCD_COMMAND_SET_MODE_8_BIT, LCD_F_INSTR); // Ustaw tryb: 8-bit, 2 linie, font 5x7
+    LCD_SendCommand(LCD_COMMAND_CURSOR_OFF, LCD_F_INSTR);     // Wyświetlacz WŁ, Kursor WYŁ, Miganie WYŁ
+    LCD_SendCommand(LCD_COMMAND_ENTER_DATA_MODE, LCD_F_INSTR);// Tryb wprowadzania: Inkrementacja kursora, bez przesunięcia
+    LCD_SendCommand(LCD_COMMAND_CLEAR_SCREEN, LCD_S_INSTR);   // Wyczyść ekran
+    LCD_SendCommand(LCD_COMMAND_RETURN_HOME, LCD_S_INSTR);    // Ustaw kursor na (0,0)
+   
+    current_lcd_row = 0;
+    current_lcd_column = 0;
+ 
+    return true;
+}
+ 
+// FUNKCJA CZYSZCZACA EKRAN
+void LCD_ClearScreen(void) {
+    LCD_SendCommand(LCD_COMMAND_CLEAR_SCREEN, LCD_S_INSTR); 
+    LCD_SendCommand(LCD_COMMAND_RETURN_HOME, LCD_S_INSTR);  
+    current_lcd_row = 0;
+    current_lcd_column = 0;
+}
+ 
+// funkcja ustawiajaca pozycje
+void LCD_SetCursor(uint8_t newRow, uint8_t newColumn) {
+    // Walidacja pozycji
+    if (newRow > 1) newRow = 1;
+    if (newColumn >= LCD_MAX_COLUMN) newColumn = LCD_MAX_COLUMN - 1;
+ 
+    current_lcd_row = newRow;
+    current_lcd_column = newColumn;
+ 
+    uint8_t address;
+    if (current_lcd_row == 0) {
+        address = LCD_COMMAND_ROW_0_HOME; // Adres początku pierwszej linii
+    } else {
+        address = LCD_COMMAND_ROW_1_HOME; // Adres początku drugiej linii
+    }
+    address += current_lcd_column; // Dodaj przesunięcie kolumny
+ 
+    LCD_SendCommand(address, LCD_F_INSTR); // Wyślij komendę ustawienia 
+}
+// wysla dane na akutalna pozycje, obsluguje przejscie do nowej linii, zwijanie.
+void LCD_PutChar(char inputCharacter) {
+    // Sprawdzenie, czy kursor nie wyszedł poza ekran 
+    if (current_lcd_column >= LCD_MAX_COLUMN) {
+        current_lcd_column = 0; // Powrót na początek kolumn
+        current_lcd_row = (current_lcd_row == 0) ? 1 : 0; // Przejście do następnej linii 
+        LCD_SetCursor(current_lcd_row, current_lcd_column); // Ustaw nową pozycję 
+    }
+ 
+    LCD_SendData(inputCharacter); // Wyślij dane
+    current_lcd_column++;         // Przesuń wewnętrzny wskaźnik kolumny
+}
+ 
+//Wyświetla przewijany tekst reklamy na dwóch liniach LCD.
+void displayScrollingAdvertisement(void) {
+    int len1 = strlen(advertisementLine1);
+    int len2 = strlen(advertisementLine2);
+ 
+    // Wyświetlanie pierwszej linii
+    LCD_SetCursor(0, 0); // Ustaw na początek pierwszej linii
+    for (int i = 0; i < LCD_MAX_COLUMN; i++) {
+        // Oblicz pozycję znaku w tekście, z przewijaniem i pustą przestrznia
+        int char_pos_in_virtual_buffer = (scrollPosLine1 + i) % (len1 + LCD_MAX_COLUMN);
+       
+        if (char_pos_in_virtual_buffer < len1) {
+            // Jeśli pozycja mieści się w długości tekstu, wyświetl 
+            LCD_PutChar(advertisementLine1[char_pos_in_virtual_buffer]);
+        } else {
+            // W przeciwnym razie wyświetl spację
+            LCD_PutChar(' ');
+        }
+    }
+ 
+    // Wyświetlanie drugiej linii
+    LCD_SetCursor(1, 0); // Ustaw na początek drugiej linii
+    for (int i = 0; i < LCD_MAX_COLUMN; i++) {
+        int char_pos_in_virtual_buffer = (scrollPosLine2 + i) % (len2 + LCD_MAX_COLUMN);
+       
+        if (char_pos_in_virtual_buffer < len2) {
+            LCD_PutChar(advertisementLine2[char_pos_in_virtual_buffer]);
+        } else {
+            LCD_PutChar(' ');
+        }
+    }
+ 
+    // Przesunięcie pozycji startowej dla następnej klatki 
+    scrollPosLine1++;
+    if (scrollPosLine1 >= (len1 + LCD_MAX_COLUMN)) { // Jeśli cały wirtualny bufor został przewinięty
+        scrollPosLine1 = 0; // Zacznij od początku
+    }
+ 
+    scrollPosLine2++;
+    // Można dodać inne tempo przewijania dla drugiej linii: scrollPosLine2 += 2;
+    // obie linie przewijają się z tą samą logiką 
+    if (scrollPosLine2 >= (len2 + LCD_MAX_COLUMN)) {
+        scrollPosLine2 = 0;
+    }
+}
+ 
+// GŁÓWNA FUNKCJA 
+int main(void) {
+    if (!LCD_Initialize()) {
+        while(1); // Zawieś w przypadku błędu
+    }
+    // pętla wyświetlająca przewijaną reklamę
+    while(1) {
+        displayScrollingAdvertisement(); // Wywołaj funkcję wyświetlającą i przewijającą tekst
+ 
+        __delay_ms(300); // Opóźnienie między kolejnymi klatkami przewijania (reguluje prędkość)
+                         
+    }
+    return 0; 
+}
